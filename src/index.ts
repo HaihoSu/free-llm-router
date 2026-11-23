@@ -206,6 +206,7 @@ import {
   generateDeviceId,
   generateTraeLoginState,
   parseTraeCallback,
+  TRAE_LOCAL_CALLBACK_URL,
   TRAE_LOGIN_CALLBACK_PATH,
   TRAE_LOGIN_STATE_TTL_MS,
 } from './providers/trae.js'
@@ -1716,9 +1717,13 @@ async function handleInner(request: Request, env: Env, ctx: ExecutionContext): P
       const state = generateTraeLoginState()
       const machineId = generateMachineId()
       const deviceId = generateDeviceId()
-      // 回调地址取**本次请求的 origin** —— 自定义域与 workers.dev 都自动正确。
+      // ⚠️ 登录 URL 里的 `auth_callback_url` 必须是**本机**地址（2026-11-24 修正）。
+      // 原来填的是本服务的 origin，实测浏览器会停在 TRAE 的「网络错误」页 ——
+      // 与 `trae.ts` 里 `capabilities.login` 的结论一致（那里写着「别再试」）。
+      // 面板对 trae 显示「粘贴回调链接」输入框（占位符就是 127.0.0.1:18080），
+      // 说明这条人工搬运路径才是设计意图。
       const callbackUrl = buildTraeCallbackUrl(url.origin, state)
-      const authUrl = buildTraeLoginURL(machineId, deviceId, callbackUrl)
+      const authUrl = buildTraeLoginURL(machineId, deviceId, TRAE_LOCAL_CALLBACK_URL)
       const expiresAt = Date.now() + TRAE_LOGIN_STATE_TTL_MS
       // ⚠️ `expiresAt` 也存进载荷：回调回写凭证时要沿用它（否则每次回跳都会把
       // 窗口续满 —— `getLoginSession` 不回传 expires_at，见 store/db.ts:128）。
