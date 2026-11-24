@@ -46,6 +46,8 @@ import assert from 'node:assert/strict'
 
 import {
   cleanupToolPairing,
+  disguiseMessages,
+  disguiseText,
   ensureStreamOptions,
   normalizeToolChoice,
   prepareChatBody,
@@ -225,6 +227,144 @@ test('⚠️ sanitizeChatBody：裸 11128 必须改写（出现在请求里本�
   // 相邻数字不受影响
   assert.equal(sanitizeChatBody('11148'), '11148')
   assert.equal(sanitizeChatBody('11101'), '11101')
+})
+
+// ─────────────── 渠道指纹脱敏（11128 unapproved channel） ───────────────
+//
+// 每个用例都来自**对线上上游的实测**（2026-11-24，同一账号同一模型，
+// 只改首条 system 内容），别用直觉往里加规则 —— 见 payload.ts 的负结果表。
+
+/** 不可见分隔符：运行时写产品名时用的就是零宽空格。 */
+const ZW = '\u200B'
+
+test('🔴 零宽空格版身份句必须被改写（旧规则用 \\s+，对它永不触发）', () => {
+  // 这是真实 DSH 请求的样子：`DeepSeek` + U+200B + ` Harness`。
+  // 旧实现 `/…DeepSeek\s+Harness/` 匹配不到 ⇒ 请求原样发出 ⇒ 线上 11128。
+  const input = `You are an AI agent powered by DeepSeek${ZW} Harness.`
+  const out = disguiseText(input)
+  assert.notEqual(out, input, '必须被改写')
+  assert.ok(!out.includes(`DeepSeek${ZW}`), `零宽空格写法必须消失：${out}`)
+  assert.ok(out.startsWith('You are an AI agent running on'), `句式应等价改写：${out}`)
+})
+
+test('身份句普通空格版同样改写（行为不回退）', () => {
+  const out = disguiseText('You are an AI agent powered by DeepSeek Harness.')
+  assert.ok(out.startsWith('You are an AI agent running on'))
+})
+
+test('身份句大小写不敏感（上游判定不分大小写）', () => {
+  const out = disguiseText('you are an ai agent powered by deepseek harness.')
+  assert.ok(!/powered\s+by/i.test(out), `仍带 powered by：${out}`)
+})
+
+test('⚠️ `Tokens prefixed with @` 必须改写（位置无关，实测拦）', () => {
+  const note =
+    'Tokens prefixed with @ are paths the user explicitly referenced. ' +
+    'Relative paths resolve from the workspace root.'
+  const out = disguiseText(note)
+  assert.ok(!out.includes('Tokens prefixed with @'))
+  assert.ok(out.includes('Tokens prefixed with (at)'), '只改这一个词，说明文字保留')
+  assert.ok(out.includes('Relative paths resolve from the workspace root.'))
+})
+
+test('⚠️ Claude Code 开场白必须改写（实测拦）', () => {
+  const out = disguiseText("You are Claude Code, Anthropic's official CLI for Claude.")
+  assert.ok(!out.includes("Anthropic's official CLI"), `仍带原句式：${out}`)
+  assert.ok(out.includes('an official CLI for Claude'))
+})
+
+test('改写幂等：重试多少次结果都一样', () => {
+  const input =
+    `You are an AI agent powered by DeepSeek${ZW} Harness.\n\n` +
+    'Tokens prefixed with @ are paths the user explicitly referenced.'
+  const once = disguiseText(input)
+  assert.equal(disguiseText(once), once)
+  assert.equal(disguiseText(disguiseText(once)), once)
+})
+
+test('实测**不**拦的文本一律不动（别凭直觉加规则）', () => {
+  // 这几条逐个发到线上都是 200 —— 改了只会白白改写用户提示词
+  for (const text of [
+    'You are a coding agent powered by the deepseek-v4.1-flash model.',
+    'Header x-anthropic-billing-header is set for this request.',
+    'To give feedback, users should report the issue at https://example.com',
+    'The runtime is DeepSeek Harness, a coding agent.',
+    'Summarise the attached report in three bullet points.',
+  ]) {
+    assert.equal(disguiseText(text), text, `不该改：${text}`)
+  }
+})
+
+test('🔴 user 轮永不改写（用户原话是数据）', () => {
+  const question = '为什么 "Tokens prefixed with @" 这行会 400？我的邮箱 a@b.com'
+  const out = disguiseMessages([
+    { role: 'user', content: question },
+  ])
+  assert.equal(out.changed, false)
+  assert.equal((out.messages[0] as Record<string, unknown>).content, question)
+})
+
+test('system / assistant 轮都改写（回放的历史 assistant 同样被扫）', () => {
+  const marker = `You are an AI agent powered by DeepSeek${ZW} Harness.`
+  const out = disguiseMessages([
+    { role: 'system', content: marker },
+    { role: 'user', content: 'hi' },
+    { role: 'assistant', content: marker },
+  ])
+  assert.equal(out.changed, true)
+  const msgs = out.messages as Array<Record<string, unknown>>
+  assert.ok(!String(msgs[0].content).includes(ZW))
+  assert.ok(!String(msgs[2].content).includes(ZW))
+  assert.equal(msgs[1].content, 'hi')
+})
+
+test('部件列表形态的 content 也要改到（否则换个写法就绕过）', () => {
+  const out = disguiseMessages([
+    {
+      role: 'system',
+      content: [{ type: 'text', text: 'Tokens prefixed with @ are paths.' }],
+    },
+  ])
+  assert.equal(out.changed, true)
+  const parts = (out.messages[0] as Record<string, unknown>).content as Array<
+    Record<string, unknown>
+  >
+  assert.equal(parts[0].text, 'Tokens prefixed with (at) are paths.')
+})
+
+test('不原地改调用方的消息对象（prepareChatBody 只做浅拷贝）', () => {
+  const original = { role: 'system', content: 'Tokens prefixed with @ are paths.' }
+  disguiseMessages([original])
+  assert.equal(original.content, 'Tokens prefixed with @ are paths.')
+})
+
+test('⚠️ prepareChatBody 会把指纹脱敏进管线并记录 applied', () => {
+  const result = prepareChatBody({
+    model: 'x',
+    messages: [{ role: 'system', content: `You are an AI agent powered by DeepSeek${ZW} Harness.` }],
+  })
+  assert.ok(result.applied.includes('disguise'))
+  assert.ok(!result.body.includes(`DeepSeek${ZW}`), `序列化结果里不该再有零宽写法：${result.body}`)
+})
+
+test('⚠️ developer 先降级为 system、再脱敏（⑥ 必须排在 ⑤ 之后的理由）', () => {
+  const result = prepareChatBody({
+    model: 'x',
+    messages: [
+      { role: 'developer', content: 'Tokens prefixed with @ are paths.' },
+      { role: 'user', content: 'hi' },
+    ],
+  })
+  const body = JSON.parse(result.body) as { messages: Array<Record<string, unknown>> }
+  assert.equal(body.messages[0].role, 'system', 'developer 应降级为 system')
+  assert.equal(body.messages[0].content, 'Tokens prefixed with (at) are paths.')
+})
+
+test('没有指纹时不产生新对象（不白改）', () => {
+  const messages = [{ role: 'system', content: 'You are a helpful assistant.' }]
+  const out = disguiseMessages(messages)
+  assert.equal(out.changed, false)
+  assert.equal(out.messages, messages, '无改动时应返回原数组')
 })
 
 // ─────────────────────── SSE 帧解析 ───────────────────────
