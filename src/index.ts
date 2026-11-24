@@ -3445,14 +3445,6 @@ async function handleInner(request: Request, env: Env, ctx: ExecutionContext): P
     return json({ ok: true, realm })
   }
 
-  // ── ⚠️ 临时：取回最近一次 chat 请求体（定位 11128 用，读完即清） ──
-  if (path === '/admin/debug/chat' && request.method === 'GET') {
-    const realm = url.searchParams.get('realm') ?? 'cn'
-    const pool = env.ACCOUNT_POOL.get(env.ACCOUNT_POOL.idFromName(realm))
-    const capture = await pool.takeChatCapture()
-    return json({ realm, capture })
-  }
-
   // ── 积分包（逐账号余额明细，实时查上游） ──
   if (path === '/admin/packages' && request.method === 'GET') {
     const realm = url.searchParams.get('realm') ?? 'cn'

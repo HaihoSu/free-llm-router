@@ -540,25 +540,6 @@ export async function handleChatCompletions(
   const bases = resolveUpstream(env)
   const pool = env.ACCOUNT_POOL.get(env.ACCOUNT_POOL.idFromName(realm))
 
-  // ⚠️ 临时调试：留一份最近一次 chat 请求体到 DO，供 `/admin/debug/chat` 取回。
-  //
-  // 为什么需要：`11128 unapproved channel` 是上游**按句子**判定的，报错本身
-  // 只说「渠道未授权」，不说是哪一句 —— 只能拿真实 body 逐段重放来二分定位。
-  // 日志环装不下 50 KB 的 prompt（见 `saveChatCapture` 的说明）。
-  //
-  // 抓完即删（删代码 + 删数据），不要留在生产里：它存的是用户原话。
-  const capture = pool
-    .saveChatCapture(JSON.stringify(upstreamBody), prepared, {
-      at: Date.now(),
-      provider: providerId,
-      model,
-      realm,
-      wantsStream,
-    })
-    .catch(() => {})
-  if (ctx !== undefined) ctx.waitUntil(capture)
-  else void capture
-
   // ⚠️ `tried` 必须**跨重试保留**，否则会在两个账号之间无限来回
   // （Go 侧 account-pool.ts:905-914 记录过这个缺陷）。
   const tried: string[] = []
