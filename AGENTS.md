@@ -353,6 +353,26 @@ src/
 
 参考实现 `WorkBuddy-Hub-Android`（Kotlin）的 `ApiAdapters.disguise` 对着另一个网关版本，规则更宽（还做品牌名兜底 hyphenating）；**我们只按自己实测到的判据改**。
 
+#### 6.6b 组合指纹：品牌名是必要成分（实测 2026-11-24，用真实 53 KB 请求体二分）
+
+拿用户真实失败的 body 二分定位，命中的是 `Web GUI` 那一段：
+
+| 变体 | 结果 |
+|---|---|
+| `You are interacting with the user through the DeepSeek Harness Web GUI whose URL…` 单独 | ✅ |
+| `When the user refers to "this page", "this GUI", or "this app"…` 单独 | ✅ |
+| **两句拼接** | ❌ 11128 |
+| 拼接，第一句去掉品牌名 | ✅ |
+| 拼接，品牌写成 **`DeepSeek-Harness`** | ✅ |
+| 拼接，第二句压掉三选一枚举 | ✅ |
+
+⇒ 上游存的是**多句组合的指纹**（片段级硬匹配永远覆盖不到），而**品牌名是必要成分**。
+故加了一条兜底规则：系统级消息里的 `DeepSeek Harness` 一律连字符化成 `DeepSeek-Harness`。
+实测这样处理后 **整份 53 KB 原始请求体（49 个工具 + 6 条消息）直接 200**。
+
+⚠️ 顺序：具体句式在前（它们依赖原文），品牌兜底在最后；连字符写法不匹配自身，幂等。
+⚠️ 工具定义（49 个 schema，49 KB）**不是**触发点：保留 tools、把消息换成 `hi` 就是 200。
+
 ### 6.7 错误分类（决定换号还是罚号）
 
 Go 侧有 13 种 `ErrKind`，判定有 12 层优先级（`internal/upstream/client.go:489-596`）。关键语义：

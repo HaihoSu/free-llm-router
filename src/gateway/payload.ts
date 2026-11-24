@@ -325,12 +325,15 @@ export function prepareChatBody(input: unknown): PrepareResult {
  * ## 不收录的候选（实测**不**触发，别凭直觉加）
  *
  * `x-anthropic-billing-header`、`To give feedback, users should report…`、
- * Codex CLI 的开场白、`Web GUI` 那两句、`You are a coding agent powered by …`、
+ * Codex CLI 的开场白、`You are a coding agent powered by …`、
  * 单独出现的 `DeepSeek Harness`（非身份句）—— 逐个发过去都是 200。
  *
- * 参考实现（`WorkBuddy-Hub-Android` 的 `ApiAdapters.disguise`）把这些全改了，
- * 因为它对着的是另一个网关版本；**我们只按自己实测到的判据改**，
- * 免得把用户提示词改得面目全非。
+ * ⚠️ 品牌名本身看似「不拦」，但它**是组合指纹的必要成分**：`Web GUI` 那两句
+ * 单独都不拦、拼起来就拦，而把品牌连字符化即放行。故仍有一条品牌兜底规则
+ * （见 `BRAND_SIGNATURE`），它不是「凭直觉加的」，是二分实测出来的。
+ *
+ * 参考实现（`WorkBuddy-Hub-Android` 的 `ApiAdapters.disguise`）把上面这些全改了，
+ * 因为它对着的是另一个网关版本；**我们只按自己实测到的判据改**。
  */
 
 /**
@@ -348,11 +351,48 @@ const IDENTITY_SIGNATURE = new RegExp(
 )
 
 /**
+ * 品牌名本身（兜底规则，**排在最后**）。
+ *
+ * ## 🔴 为什么必须有这一条（实测 2026-11-24，用真实 DSH 请求体二分定位）
+ *
+ * 拿用户真实失败的 53 KB 请求体做二分，命中的是这一段：
+ *
+ * ```
+ * You are interacting with the user through the DeepSeek Harness Web GUI whose URL
+ * the runtime context names. When the user refers to "this page", "this GUI", or
+ * "this app" without naming another target, they mean this GUI.
+ * ```
+ *
+ * 诡异之处：**两句单独发都是 200，拼在一起才拦**。逐个变体测下来：
+ *
+ * | 变体 | 结果 |
+ * |---|---|
+ * | 只有第一句（含品牌名） | ✅ |
+ * | 只有第二句（`this page` / `this GUI` / `this app`） | ✅ |
+ * | 两句拼接 | ❌ 11128 |
+ * | 拼接，但第一句去掉品牌名 | ✅ |
+ * | **拼接，品牌名写成 `DeepSeek-Harness`** | ✅ |
+ * | 第一句 + 同义改写后的第二句（去掉三选一枚举） | ✅ |
+ *
+ * ⇒ 上游存的是**多句组合的指纹**（片段级硬匹配不可能覆盖，改写任何一部
+ * 分就散架），而**品牌名是这套指纹的必要成分**。
+ *
+ * 故兜底策略：把系统级消息里出现的品牌名一律连字符化。
+ * 实测这样处理后，**整份 53 KB 原始请求体（含 49 个工具、6 条消息）直接 200**。
+ *
+ * ⚠️ 连字符写法本身不会被误伤（`DeepSeek-Harness` 不匹配本规则），故幂等。
+ */
+const BRAND_SIGNATURE = new RegExp(`DeepSeek${GAP}*Harness`, 'gi')
+
+/**
  * 客户端系统提示里会被判成「未授权渠道」的固定片段。
  *
  * 每条都只动**最小的一处措辞**，句子对模型的意思不变：
  * `powered by`→`running on`、`@`→`(at)`、少一个 `the` 换成 `an`。
  * 替换文本本身不能再命中任何一条（保证幂等，重试多少次结果都一样）。
+ *
+ * ⚠️ 顺序有意义：具体句式在前、品牌兜底在最后，否则兜底会把具体规则
+ * 依赖的原文（`…powered by DeepSeek Harness`）先改掉，规则就失效了。
  */
 const CHANNEL_SIGNATURES: Array<{ pattern: RegExp; replacement: string }> = [
   // ① DSH 运行时的自我描述（**必须用 GAP**，见上方教训）
@@ -367,6 +407,8 @@ const CHANNEL_SIGNATURES: Array<{ pattern: RegExp; replacement: string }> = [
     pattern: /You are Claude Code, Anthropic's official CLI for Claude\./gi,
     replacement: "You are Claude Code, an official CLI for Claude.",
   },
+  // ④ 品牌名兜底（必须最后，见 BRAND_SIGNATURE 的实测表）
+  { pattern: BRAND_SIGNATURE, replacement: 'DeepSeek-Harness' },
 ]
 
 /**

@@ -283,16 +283,40 @@ test('改写幂等：重试多少次结果都一样', () => {
 })
 
 test('实测**不**拦的文本一律不动（别凭直觉加规则）', () => {
-  // 这几条逐个发到线上都是 200 —— 改了只会白白改写用户提示词
+  // 这几条逐个发到线上都是 200 —— 改了只会白白改写用户提示词。
+  // ⚠️ 品牌名是例外：它单独出现虽不拦，却是「组合指纹」的必要成分，
+  // 故有兜底规则（见下一条用例），不放在这个清单里。
   for (const text of [
     'You are a coding agent powered by the deepseek-v4.1-flash model.',
     'Header x-anthropic-billing-header is set for this request.',
     'To give feedback, users should report the issue at https://example.com',
-    'The runtime is DeepSeek Harness, a coding agent.',
+    'The browser provides no implicit DOM, route, or screenshot context.',
     'Summarise the attached report in three bullet points.',
   ]) {
     assert.equal(disguiseText(text), text, `不该改：${text}`)
   }
+})
+
+test('🔴 品牌兜底：组合指纹（Web GUI 两句）靠连字符化散架', () => {
+  // 真实 DSH 提示词里的两段：单独发都是 200，拼起来 11128；
+  // 把品牌名改写成 `DeepSeek-Harness` 即放行（线上实测）。
+  const s0 =
+    'You are interacting with the user through the DeepSeek Harness Web GUI whose URL ' +
+    'the runtime context names.'
+  const s1 =
+    'When the user refers to "this page", "this GUI", or "this app" without naming ' +
+    'another target, they mean this GUI.'
+  const out = disguiseText(`${s0} ${s1}`)
+  assert.ok(out.includes('DeepSeek-Harness Web GUI'), `品牌必须连字符化：${out}`)
+  assert.ok(out.includes('they mean this GUI.'), '其余文字不动')
+  // 幂等：连字符写法不再命中品牌规则
+  assert.equal(disguiseText(out), out)
+})
+
+test('品牌兜底覆盖零宽空格写法', () => {
+  const out = disguiseText(`The runtime is DeepSeek${ZW} Harness, a coding agent.`)
+  assert.ok(out.includes('DeepSeek-Harness'), out)
+  assert.ok(!out.includes(ZW))
 })
 
 test('🔴 user 轮永不改写（用户原话是数据）', () => {
