@@ -540,6 +540,28 @@ export async function handleChatCompletions(
   const bases = resolveUpstream(env)
   const pool = env.ACCOUNT_POOL.get(env.ACCOUNT_POOL.idFromName(realm))
 
+  // ── TEMP DEBUG（抓完即删）：记录客户端真实请求形态 ──
+  try {
+    const hdrs: Record<string, string> = {}
+    request.headers.forEach((v, k) => {
+      if (/authorization|x-api-key/i.test(k)) return
+      hdrs[k] = v.length > 80 ? v.slice(0, 80) + '…' : v
+    })
+    const raw = JSON.stringify(rawBody)
+    await pool.appendLog({
+      type: 'debug_body',
+      at: new Date().toISOString(),
+      rawModel,
+      model,
+      bytes: raw.length,
+      keys: rawBody !== null && typeof rawBody === 'object'
+        ? Object.keys(rawBody as Record<string, unknown>)
+        : [],
+      preview: raw.slice(0, 600),
+      headers: hdrs,
+    })
+  } catch { /* 调试日志失败不影响主流程 */ }
+
   // ⚠️ `tried` 必须**跨重试保留**，否则会在两个账号之间无限来回
   // （Go 侧 account-pool.ts:905-914 记录过这个缺陷）。
   const tried: string[] = []
