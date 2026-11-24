@@ -1048,6 +1048,40 @@ export class AccountPoolDO extends DurableObject<Env> {
     await this.ctx.storage.put('log:ring', [])
   }
 
+  /**
+   * ⚠️ **临时调试**：保存最近一次 chat 的出站请求体（抓到即删）。
+   *
+   * ## 为什么要存进 DO 而不是日志环
+   *
+   * 日志环是**单个 value**，一条 50 KB 的请求体塞两三条就超上限（128 KB）。
+   * 故拆成三个独立 key；`raw` 是客户端原文，`prepared` 是脱敏后**真正发出去**
+   * 的那一份 —— 两者对比才能看出「我们改了哪、上游还拦什么」。
+   *
+   * 读取时由 `index.ts` 的 `/admin/debug/chat` 一并清掉，不留存。
+   */
+  async saveChatCapture(
+    raw: string,
+    prepared: string,
+    meta: Record<string, unknown>,
+  ): Promise<void> {
+    await this.ctx.storage.put('debug:chat:meta', meta)
+    await this.ctx.storage.put('debug:chat:raw', raw)
+    await this.ctx.storage.put('debug:chat:prepared', prepared)
+  }
+
+  /** 读取并清空最近一次 chat 请求体。 */
+  async takeChatCapture(): Promise<{
+    meta?: Record<string, unknown>
+    raw?: string
+    prepared?: string
+  }> {
+    const meta = await this.ctx.storage.get<Record<string, unknown>>('debug:chat:meta')
+    const raw = await this.ctx.storage.get<string>('debug:chat:raw')
+    const prepared = await this.ctx.storage.get<string>('debug:chat:prepared')
+    await this.ctx.storage.delete(['debug:chat:meta', 'debug:chat:raw', 'debug:chat:prepared'])
+    return { meta, raw, prepared }
+  }
+
     /**
    * 清除模型级冷却（面板「解冻」用）。
    *
