@@ -331,7 +331,47 @@ src/
 
 ### 6.6 反探测脱敏
 
-请求体只要出现裸数字 `11128` 就会被拦截，**包含在请求里本身就是拦截条件** ⇒ 必须整段改写（`internal/upstream/sanitize.go:70-76`）。
+请求体只要出现裸数字 `11128` 就会被拦截，**包含在请求里本身就是拦截条件** ⇒ 必须整段改写（`internal/upstream/sanitize.go:70-76`）。由 `payload.ts` 的 `sanitizeChatBody` 做（串级、不分角色）。
+
+#### 6.6a 渠道指纹（`11128 unapproved channel`，实测 2026-11-24）
+
+上游还会按**系统级消息里的固定句式**判定「未授权渠道」。实测（同一账号/模型/出站头，只改首条 `system`）：
+
+| 内容 | 结果 |
+|---|---|
+| `You are an AI agent powered by DeepSeek Harness.` | ❌ 11128 |
+| 同上，但产品名里是 **U+200B 零宽空格**（运行时的真实写法） | ❌ 11128 |
+| 同上，**嵌在提示词中间**（非偏移 0） | ✅ |
+| `Tokens prefixed with @ are paths…` | ❌ 11128 |
+| `You are Claude Code, Anthropic's official CLI for Claude.` | ❌ 11128 |
+| `x-anthropic-billing-header` / `To give feedback…` / Codex 开场白 / `Web GUI` 两句 / `You are a coding agent powered by …` / 单独的品牌名 | ✅（**不要**加规则） |
+
+两条硬教训：
+
+1. **`\s` 匹配不到 `U+200B`**（只在 `\u00A0` / `\u2000-200A` / `\uFEFF` 上成立）。用 `\s+` 写的规则在真实请求上从不触发，而单测用普通空格构造的字符串永远通过 —— 必须用显式字符类 `[\s\u00A0\u200B\u2060\uFEFF]`，且**单测要带零宽空格用例**。
+2. 只改 `system` / `assistant`，**不改 `user`**（用户原话是数据，上游也不按它判定）。`developer` 已由 `cleanupToolPairing` 降级成 `system`，故脱敏必须排在它之后。
+
+参考实现 `WorkBuddy-Hub-Android`（Kotlin）的 `ApiAdapters.disguise` 对着另一个网关版本，规则更宽（还做品牌名兜底 hyphenating）；**我们只按自己实测到的判据改**。
+
+#### 6.6b 组合指纹：品牌名是必要成分（实测 2026-11-24，用真实 53 KB 请求体二分）
+
+拿用户真实失败的 body 二分定位，命中的是 `Web GUI` 那一段：
+
+| 变体 | 结果 |
+|---|---|
+| `You are interacting with the user through the DeepSeek Harness Web GUI whose URL…` 单独 | ✅ |
+| `When the user refers to "this page", "this GUI", or "this app"…` 单独 | ✅ |
+| **两句拼接** | ❌ 11128 |
+| 拼接，第一句去掉品牌名 | ✅ |
+| 拼接，品牌写成 **`DeepSeek-Harness`** | ✅ |
+| 拼接，第二句压掉三选一枚举 | ✅ |
+
+⇒ 上游存的是**多句组合的指纹**（片段级硬匹配永远覆盖不到），而**品牌名是必要成分**。
+故加了一条兜底规则：系统级消息里的 `DeepSeek Harness` 一律连字符化成 `DeepSeek-Harness`。
+实测这样处理后 **整份 53 KB 原始请求体（49 个工具 + 6 条消息）直接 200**。
+
+⚠️ 顺序：具体句式在前（它们依赖原文），品牌兜底在最后；连字符写法不匹配自身，幂等。
+⚠️ 工具定义（49 个 schema，49 KB）**不是**触发点：保留 tools、把消息换成 `hi` 就是 200。
 
 ### 6.7 错误分类（决定换号还是罚号）
 

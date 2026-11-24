@@ -194,7 +194,7 @@ export interface PrepareResult {
  * 完整准备管线。
  *
  * ⚠️ 顺序即语义：先翻译字段名（影响后续判断），再清理工具配对
- * （配对错误会让整个请求失败，必须最先修好内容）。
+ * （配对错误会让整个请求失败，必须最先修好内容），最后按角色做渠道指纹脱敏。
  */
 /**
  * 请求里**是否带图片**（纯函数）。
@@ -281,16 +281,229 @@ export function prepareChatBody(input: unknown): PrepareResult {
     throw new Error('messages 必须是数组')
   }
 
+  // ⑥ 渠道指纹脱敏（**必须排在 ⑤ 之后**：`developer` 要先被降级成 `system`，
+  // 那条消息里的指纹才会被 `DISGUISED_ROLES` 覆盖到）
+  const disguised = disguiseMessages(body.messages as unknown[])
+  if (disguised.changed) {
+    body.messages = disguised.messages
+    applied.push('disguise')
+  }
+
   return { body: JSON.stringify(body), applied }
 }
 
 /**
- * 反探测脱敏（AGENTS.md §6.6）。
+ * 渠道指纹脱敏（AGENTS.md §6.6）。
+ *
+ * 上游会**按请求体里的固定句式识别客户端渠道**，认出「未授权渠道」就回
+ * `11128 Illegal API invocation from an unapproved channel`
+ *（`displayMsg` 把它伪装成「安全策略拦截」，极易误判成账号被封）。
+ *
+ * ## 🔴 教训：`\s` 匹配不到零宽空格，规则「写对了却从不触发」
+ *
+ * 运行时把产品名写成 `DeepSeek` + **U+200B（零宽空格）** + ` Harness`。
+ * 而 JS 的 `\s` **不含 `U+200B`**（它只在 `\uFEFF` / `\u00A0` / `\u2000-200A`
+ * 这些上成立）⇒ 用 `\s+` 写的旧规则在真实 DSH 请求上**一次都没命中过**，
+ * 请求原样发出、照样被拦，而单测用普通空格构造的字符串**永远是通过的**。
+ *
+ * 实测（本机，2026-11-24，同一账号同一模型，只改首条 system 内容）：
+ *
+ * | 首条 system 内容 | 结果 |
+ * |---|---|
+ * | `…powered by DeepSeek Harness.`（普通空格） | ✅（旧规则改写了它） |
+ * | `…powered by DeepSeek\u200B Harness.`（零宽空格） | ❌ 11128 |
+ * | `…DeepSeek\u200B Harness…`（零宽空格，**不在开头**） | ✅ |
+ * | `Tokens prefixed with @ are paths…` | ❌ 11128 |
+ * | `You are Claude Code, Anthropic's official CLI for Claude.` | ❌ 11128 |
+ * | 以上全部换成 `DeepSeek-Harness` / `(at)` / `an official CLI` 的写法 | ✅ |
+ *
+ * 两条结论：
+ * 1. 判据是**精确子串**（大小写不敏感、**任意不可见分隔符**容错），不是语义；
+ * 2. 身份句只在**消息开头**（偏移 0）被判 —— 同一句挪到中间就放行。
+ *    我们仍**故意全局替换**：改写是语义等价的、幂等的，宁可多改不漏改。
+ *
+ * ## 不收录的候选（实测**不**触发，别凭直觉加）
+ *
+ * `x-anthropic-billing-header`、`To give feedback, users should report…`、
+ * Codex CLI 的开场白、`You are a coding agent powered by …`、
+ * 单独出现的 `DeepSeek Harness`（非身份句）—— 逐个发过去都是 200。
+ *
+ * ⚠️ 品牌名本身看似「不拦」，但它**是组合指纹的必要成分**：`Web GUI` 那两句
+ * 单独都不拦、拼起来就拦，而把品牌连字符化即放行。故仍有一条品牌兜底规则
+ * （见 `BRAND_SIGNATURE`），它不是「凭直觉加的」，是二分实测出来的。
+ *
+ * 参考实现（`WorkBuddy-Hub-Android` 的 `ApiAdapters.disguise`）把上面这些全改了，
+ * 因为它对着的是另一个网关版本；**我们只按自己实测到的判据改**。
+ */
+
+/**
+ * 上游眼里的「分隔符」，而字面比较看不见的那一类。
+ *
+ * `\u200B` 零宽空格 / `\u2060` word-joiner / `\uFEFF` BOM / `\u00A0` 不换行空格。
+ * ⚠️ 判据里**必须**带上它们，否则规则对真实运行时写的文本永不生效。
+ */
+const GAP = '[\\s\\u00A0\\u200B\\u2060\\uFEFF]'
+
+/** 身份句：`You are an AI agent powered by DeepSeek Harness`。 */
+const IDENTITY_SIGNATURE = new RegExp(
+  `You${GAP}+are${GAP}+an${GAP}+AI${GAP}+agent${GAP}+powered${GAP}+by${GAP}+DeepSeek${GAP}*Harness`,
+  'gi',
+)
+
+/**
+ * 品牌名本身（兜底规则，**排在最后**）。
+ *
+ * ## 🔴 为什么必须有这一条（实测 2026-11-24，用真实 DSH 请求体二分定位）
+ *
+ * 拿用户真实失败的 53 KB 请求体做二分，命中的是这一段：
+ *
+ * ```
+ * You are interacting with the user through the DeepSeek Harness Web GUI whose URL
+ * the runtime context names. When the user refers to "this page", "this GUI", or
+ * "this app" without naming another target, they mean this GUI.
+ * ```
+ *
+ * 诡异之处：**两句单独发都是 200，拼在一起才拦**。逐个变体测下来：
+ *
+ * | 变体 | 结果 |
+ * |---|---|
+ * | 只有第一句（含品牌名） | ✅ |
+ * | 只有第二句（`this page` / `this GUI` / `this app`） | ✅ |
+ * | 两句拼接 | ❌ 11128 |
+ * | 拼接，但第一句去掉品牌名 | ✅ |
+ * | **拼接，品牌名写成 `DeepSeek-Harness`** | ✅ |
+ * | 第一句 + 同义改写后的第二句（去掉三选一枚举） | ✅ |
+ *
+ * ⇒ 上游存的是**多句组合的指纹**（片段级硬匹配不可能覆盖，改写任何一部
+ * 分就散架），而**品牌名是这套指纹的必要成分**。
+ *
+ * 故兜底策略：把系统级消息里出现的品牌名一律连字符化。
+ * 实测这样处理后，**整份 53 KB 原始请求体（含 49 个工具、6 条消息）直接 200**。
+ *
+ * ⚠️ 连字符写法本身不会被误伤（`DeepSeek-Harness` 不匹配本规则），故幂等。
+ */
+const BRAND_SIGNATURE = new RegExp(`DeepSeek${GAP}*Harness`, 'gi')
+
+/**
+ * 客户端系统提示里会被判成「未授权渠道」的固定片段。
+ *
+ * 每条都只动**最小的一处措辞**，句子对模型的意思不变：
+ * `powered by`→`running on`、`@`→`(at)`、少一个 `the` 换成 `an`。
+ * 替换文本本身不能再命中任何一条（保证幂等，重试多少次结果都一样）。
+ *
+ * ⚠️ 顺序有意义：具体句式在前、品牌兜底在最后，否则兜底会把具体规则
+ * 依赖的原文（`…powered by DeepSeek Harness`）先改掉，规则就失效了。
+ */
+const CHANNEL_SIGNATURES: Array<{ pattern: RegExp; replacement: string }> = [
+  // ① DSH 运行时的自我描述（**必须用 GAP**，见上方教训）
+  {
+    pattern: IDENTITY_SIGNATURE,
+    replacement: 'You are an AI agent running on DeepSeek Harness',
+  },
+  // ② 编码 agent 的 `@` 引用说明。实测**位置无关**，出现在 27 KB 提示词中间也拦。
+  { pattern: /Tokens prefixed with @/gi, replacement: 'Tokens prefixed with (at)' },
+  // ③ Claude Code 的开场白（Anthropic 生态客户端发的系统提示）
+  {
+    pattern: /You are Claude Code, Anthropic's official CLI for Claude\./gi,
+    replacement: "You are Claude Code, an official CLI for Claude.",
+  },
+  // ④ 品牌名兜底（必须最后，见 BRAND_SIGNATURE 的实测表）
+  { pattern: BRAND_SIGNATURE, replacement: 'DeepSeek-Harness' },
+]
+
+/**
+ * 上游会读的角色。
+ *
+ * 整段对话都在扫描范围里（回放的历史 assistant 消息同样会被判），
+ * 但 `user` **不在内** —— 用户写的话是数据，上游也不按它判定；
+ * 改写用户内容属于「改了用户问的是什么」，收益为零、风险非零。
+ *
+ * ⚠️ `developer` 不用列：`cleanupToolPairing` 已把它降级成 `system`。
+ */
+const DISGUISED_ROLES = new Set(['system', 'assistant'])
+
+/** 改写一段文本里所有被拦的指纹（纯函数、幂等）。 */
+export function disguiseText(text: string): string {
+  if (text === '') return text
+  let out = text
+  for (const { pattern, replacement } of CHANNEL_SIGNATURES) {
+    // `g` 正则的 `lastIndex` 会跨调用残留；`replace` 对全局正则内部会先复位，
+    // 但显式复位一次不花什么钱，且避免以后有人改成 `test()` 时踩坑。
+    pattern.lastIndex = 0
+    out = out.replace(pattern, replacement)
+  }
+  return out
+}
+
+/** 是否需要改写（快速子串预筛，避免对每条消息都跑正则）。 */
+function needsDisguise(text: string): boolean {
+  return (
+    text.includes('Tokens prefixed with @') ||
+    text.includes('x-anthropic-billing-header') ||
+    text.includes('You are Claude Code') ||
+    /DeepSeek[\s\u00A0\u200B\u2060\uFEFF]*Harness/i.test(text)
+  )
+}
+
+/**
+ * 按角色逐条脱敏（对象级，能区分 `system` / `user`）。
+ *
+ * `content` 两种形态都要处理：字符串，或部件列表（`[{type:'text',text}]`）——
+ * 后者漏掉的话，客户端换个写法就绕过了规则，等于没做。
+ *
+ * @returns 有改动时返回新数组（**不原地改**调用方的消息对象）
+ */
+export function disguiseMessages(messages: unknown[]): {
+  messages: unknown[]
+  changed: boolean
+} {
+  let changed = false
+  const out = messages.map((raw) => {
+    if (raw === null || typeof raw !== 'object') return raw
+    const msg = raw as Record<string, unknown>
+    if (typeof msg.role !== 'string' || !DISGUISED_ROLES.has(msg.role)) return msg
+
+    const content = msg.content
+    if (typeof content === 'string') {
+      if (!needsDisguise(content)) return msg
+      const next = disguiseText(content)
+      if (next === content) return msg
+      changed = true
+      return { ...msg, content: next }
+    }
+
+    if (Array.isArray(content)) {
+      let touched = false
+      const parts = content.map((part) => {
+        if (part === null || typeof part !== 'object') return part
+        const rec = part as Record<string, unknown>
+        const text = rec.text
+        if (typeof text !== 'string' || !needsDisguise(text)) return part
+        const next = disguiseText(text)
+        if (next === text) return part
+        touched = true
+        return { ...rec, text: next }
+      })
+      if (!touched) return msg
+      changed = true
+      return { ...msg, content: parts }
+    }
+
+    return msg
+  })
+  return { messages: changed ? out : messages, changed }
+}
+
+/**
+ * 反探测脱敏（AGENTS.md §6.6），**串级**。
  *
  * 裸数字 `11128` 出现在请求体里**本身就是拦截条件**，必须改写。
  * 零宽空格无效（上游会归一化），故插入连字符。
+ *
+ * ⚠️ 句式级的指纹改写**不在这里**，而在 `prepareChatBody` 的 ⑥ 步
+ * （`disguiseMessages`）—— 那里拿得到**角色**，才可能只改
+ * `system`/`assistant` 而不碰用户原话。此处只做这个不分角色的数字替换。
  */
 export function sanitizeChatBody(body: string): string {
-  if (!body.includes('11128')) return body
-  return body.replaceAll('11128', '11-128')
+  return body.includes('11128') ? body.replaceAll('11128', '11-128') : body
 }
