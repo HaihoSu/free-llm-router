@@ -224,6 +224,10 @@ export class AccountPoolDO extends DurableObject<Env> {
     // 建表必须完成后再放行任何请求，否则首次调用会撞上不存在的表。
     ctx.blockConcurrencyWhile(async () => {
       migrate(ctx.storage.sql)
+      // 清掉历史残留：早期为定位 `11128` 临时把请求体存进过 `debug:chat:*`
+      // （代码已删）。这些 key 装的是用户原始提示词，不该长期留着。
+      const stale = await ctx.storage.list({ prefix: 'debug:chat:' })
+      if (stale.size > 0) await ctx.storage.delete([...stale.keys()])
     })
   }
 
