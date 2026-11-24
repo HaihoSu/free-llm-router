@@ -548,6 +548,7 @@ export async function handleChatCompletions(
       hdrs[k] = v.length > 80 ? v.slice(0, 80) + '…' : v
     })
     const raw = JSON.stringify(rawBody)
+    await pool.setDebugBody(raw)
     await pool.appendLog({
       type: 'debug_body',
       at: new Date().toISOString(),

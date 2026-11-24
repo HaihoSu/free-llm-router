@@ -3430,6 +3430,12 @@ async function handleInner(request: Request, env: Env, ctx: ExecutionContext): P
   }
 
   // ── 请求日志 ──
+  // TEMP DEBUG（抓完即删）：取最近一次 chat 请求体全文
+  if (path === '/admin/debug/body' && request.method === 'GET') {
+    const realm = url.searchParams.get('realm') ?? 'cn'
+    const pool = env.ACCOUNT_POOL.get(env.ACCOUNT_POOL.idFromName(realm))
+    return json({ realm, body: await pool.getDebugBody() })
+  }
   if (path === '/admin/logs' && request.method === 'GET') {
     const realm = url.searchParams.get('realm') ?? 'cn'
     const limit = Number.parseInt(url.searchParams.get('limit') ?? '100', 10)

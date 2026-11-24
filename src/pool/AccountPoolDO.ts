@@ -1037,6 +1037,21 @@ export class AccountPoolDO extends DurableObject<Env> {
     await this.ctx.storage.put('log:ring', ring.slice(-200))
   }
 
+  /**
+   * TEMP DEBUG（抓完即删）：保存最近一次 chat 请求体，供逐字复现。
+   *
+   * ⚠️ 单独存一个值而不是塞进日志环：环形缓冲是**单个 value**，
+   * 50 KB/条的日志两三条就会撞上 value 大小上限。
+   */
+  async setDebugBody(value: string): Promise<void> {
+    await this.ctx.storage.put('debug:body', value.slice(0, 120_000))
+  }
+
+  /** TEMP DEBUG（抓完即删）。 */
+  async getDebugBody(): Promise<string> {
+    return (await this.ctx.storage.get<string>('debug:body')) ?? ''
+  }
+
   /** 读日志（最新的在前）。 */
   async readLogs(limit = 100): Promise<Array<Record<string, unknown>>> {
     const ring = (await this.ctx.storage.get<Array<Record<string, unknown>>>('log:ring')) ?? []
