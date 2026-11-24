@@ -1853,6 +1853,19 @@ export const TRAE_CONSOLE_HOST = 'https://www.trae.cn'
 export const TRAE_AUTHORIZATION_PATH = '/authorization'
 
 /**
+ * TRAE 登录 URL 里**必须**填的本机回调地址（`auth_type=local` 的字面语义）。
+ *
+ * ⚠️ 不要把它换成本服务的 https 地址：实测会导致浏览器停在 TRAE 的
+ * 「网络错误，请刷新页面重试」页，登录完全走不下去（结论见
+ * `capabilities.login` 的注释，那里也记录了「别再试」）。
+ *
+ * 回调落在打不开的 `127.0.0.1:18080` 上不是问题 —— 凭证在**地址栏里**，
+ * 由用户复制后经 `/admin/providers/login/submit-callback` 粘回面板，
+ * 再由轮询统一做 `ExchangeToken`（refreshToken 是轮换型的，只能有一个交换出口）。
+ */
+export const TRAE_LOCAL_CALLBACK_URL = 'http://127.0.0.1:18080/authorize'
+
+/**
  * 本服务接收浏览器回跳的路径前缀。
  *
  * ⚠️ `state` 放在**路径**里（与 codearts 同款，`codearts.ts:716-722`）：
