@@ -745,6 +745,25 @@ export async function handleChatCompletions(
   }
 
   // 所有轮转都失败
+  //
+  // ⚠️ 失败**必须留痕**：在这之前，客户端的报错只有它自己看得到，面板「日志」
+  // 页永远是「暂无日志」—— 用户问「去哪看报错」时无处可查（本项目实测踩过）。
+  // 只记失败，不记成功：日志环只有 200 条，成功请求会把它们冲掉。
+  const logged = pool
+    .appendLog({
+      at: Date.now(),
+      ok: false,
+      provider: providerId,
+      model,
+      status: lastError?.status ?? 502,
+      errorKind: lastError?.kind ?? 'upstream_error',
+      message: (lastError === undefined ? '所有账号均失败' : lastError.message).slice(0, 500),
+      attempts: tried.length,
+    })
+    .catch(() => {})
+  if (ctx !== undefined) ctx.waitUntil(logged)
+  else void logged
+
   return {
     response: jsonError(
       lastError?.status ?? 502,
