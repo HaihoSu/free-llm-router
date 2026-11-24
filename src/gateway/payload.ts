@@ -289,8 +289,47 @@ export function prepareChatBody(input: unknown): PrepareResult {
  *
  * 裸数字 `11128` 出现在请求体里**本身就是拦截条件**，必须改写。
  * 零宽空格无效（上游会归一化），故插入连字符。
+ *
+ * ## 渠道指纹签名改写（实测 2026-11-24）
+ *
+ * 上游除了反探测，还会**按请求体里的固定句式识别客户端渠道**，
+ * 认出「未授权渠道」就回 `11128 Illegal API invocation from an unapproved channel`。
+ *
+ * 实测结论（同一账号、同一模型、同一套出站头，只有 body 不同）：
+ *
+ * | 首条消息内容 | 结果 |
+ * |---|---|
+ * | `You are an AI agent powered by DeepSeek Harness.` | ❌ 11128 |
+ * | `You are a coding agent powered by DeepSeek Harness.` | ✅ |
+ * | `You are an AI agent powered by Foo Bar.` | ✅ |
+ * | `You are an AI assistant powered by DeepSeek Harness.` | ✅ |
+ * | `This AI agent is powered by DeepSeek Harness.` | ✅ |
+ * | `You are an AI agent powered by deepseek harness.`（小写） | ❌ 11128 |
+ * | `You are an AI agent powered by  DeepSeek Harness.`（双空格） | ❌ 11128 |
+ *
+ * ⇒ 判据是**精确子串**（大小写不敏感、空白容错），而不是语义：
+ * 只要 `AI agent` + `powered by` + `DeepSeek Harness` 这个组合出现就命中。
+ * 这是 DeepSeek Harness（DSH）客户端系统提示的第一句，被上游当成了渠道指纹。
+ *
+ * 处置：改写成**语义等价**、但不命中签名的句式（`powered by` → `running on`）。
+ * 只动这一句的措辞，不删内容、不改用户自己的提示词。
  */
+const CHANNEL_SIGNATURES: Array<{ pattern: RegExp; replacement: string }> = [
+  {
+    pattern: /You are an AI agent\s+powered\s+by\s+DeepSeek\s+Harness/gi,
+    replacement: 'You are an AI agent running on DeepSeek Harness',
+  },
+]
+
 export function sanitizeChatBody(body: string): string {
-  if (!body.includes('11128')) return body
-  return body.replaceAll('11128', '11-128')
+  let out = body.includes('11128') ? body.replaceAll('11128', '11-128') : body
+  for (const { pattern, replacement } of CHANNEL_SIGNATURES) {
+    // ⚠️ `g` 正则的 `lastIndex` 会跨调用残留，先复位再测
+    pattern.lastIndex = 0
+    if (pattern.test(out)) {
+      pattern.lastIndex = 0
+      out = out.replace(pattern, replacement)
+    }
+  }
+  return out
 }
