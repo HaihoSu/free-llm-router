@@ -1251,8 +1251,12 @@ async function checkin(
       provider: product.id,
       message: 'Qoder 自动签到需要设备身份头 `Cosy-MachineToken` + `Cosy-MachineType`（必须成对）。'
         + 'Workers 无法运行 Qoder 的 `runtime-info.exe` 生成它们，'
-        + '请在导入凭据时把这两个值一并放进 `machineToken` / `machineType` 字段'
-        + '（可从 Qoder 桌面端的 `machine_token.json` 取：`token` → machineToken、`type` → machineType）。'
+        + '请把这两个值补进该账号的凭据 extras'
+        + '（管理接口 `POST /admin/credentials/extras`，key 为 `machineToken` / `machineType`）。'
+        // ⚠️ 取值位置是**实测**的：0.5.17 的 CN 客户端里**没有** `machine_token.json`
+        //（旧注释误导过一轮），真正的来源是安装目录下的这个 exe，输出 JSON 直接带两项。
+        + '取值：在 Qoder 安装目录的 `<安装目录>/resources/umid/` 下运行 `runtime-info.exe`，'
+        + '它输出的 JSON 里 `machineToken` / `machineType` 两项即是。'
         + '缺这两个头时服务端只下发 1 条 `VIEW_DETAILS`（`claimable:false`），'
         + '此时「今天已领」与「没有可领项」无法区分 —— 故这里如实报错而不谎报已领',
     })
