@@ -814,6 +814,45 @@ export class AccountPoolDO extends DurableObject<Env> {
   }
 
   /**
+   * 只合并凭据的 `extras`，**不动 access / refresh token**。
+   *
+   * ## 为什么需要这个「只改配置」的入口
+   *
+   * Qoder 的每日领取要求成对下发 `Cosy-MachineToken` + `Cosy-MachineType`，
+   * 而这两个值由桌面端的 `resources/umid/runtime-info.exe` 现场生成
+   * （设备指纹 SDK），Workers **没有 `child_process`**，生成不了
+   * （见 `providers/qoder.ts` 顶部第 4 条）。
+   *
+   * 若唯一的写入途径是「重新导入完整凭据」，用户就得再登一次 ——
+   * 而设备码登录流程本身**也拿不到机器头**，于是形成死循环：
+   * 有 token 的号补不了头，补了头的号又没有 token。
+   *
+   * ⚠️ 凭据不存在时返回 `undefined`（调用方回 404），**不静默新建**：
+   * 新建出来的凭据没有 `accessToken`，会变成一条「存在但一用就 401」的废号。
+   *
+   * ⚠️ 走「读 → 合并 → 整体重写」，与 `putCredential` 同一把 `CREDENTIAL_KEY`；
+   * 写回的是完整对象（含 token），故 token 不会被这次操作抹掉。
+   */
+  async mergeCredentialExtras(
+    uid: string,
+    patch: Record<string, string>,
+  ): Promise<{ uid: string; extras: string[] } | undefined> {
+    const raw = await this.getCredential(uid)
+    if (raw === undefined) return undefined
+    if (typeof raw !== 'object' || raw === null) {
+      throw new Error(`凭据形状异常（不是对象）：${uid}`)
+    }
+    const credential = raw as { extras?: unknown }
+    const existing =
+      typeof credential.extras === 'object' && credential.extras !== null
+        ? (credential.extras as Record<string, string>)
+        : {}
+    const merged = { ...existing, ...patch }
+    await this.putCredential(uid, { ...credential, extras: merged }, Date.now())
+    return { uid, extras: Object.keys(merged).sort() }
+  }
+
+  /**
    * 批量取「各账号凭据的过期时刻」（一次 RPC，不是 N 次）。
    *
    * ## 为什么需要它

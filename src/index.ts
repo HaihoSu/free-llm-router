@@ -3654,6 +3654,63 @@ async function handleInner(request: Request, env: Env, ctx: ExecutionContext): P
     return json({ realm, count: uids.length, uids })
   }
 
+  // ── 补写凭据 extras（**只改配置，不动 token**） ──
+  //
+  // 目前唯一的用户是 Qoder：每日领取要求成对下发
+  // `Cosy-MachineToken` + `Cosy-MachineType`，而这两个值只能在装了 Qoder
+  // 桌面端的机器上由 `resources/umid/runtime-info.exe` 生成（Workers 无
+  // `child_process`）。
+  //
+  // ⚠️ 以前只能靠「重新导入完整凭据」补字段 —— 但设备码登录拿不到机器头，
+  // 于是有 token 的号补不了头、补了头的号又没 token。这个端点就是拆这个死结。
+  //
+  // 用法（主密钥）：
+  //   curl -X POST https://<域名>/admin/credentials/extras \
+  //     -H "Authorization: Bearer $API_KEY" -H 'content-type: application/json' \
+  //     -d '{"realm":"cn","uid":"qodercn:<uid>","extras":{"machineToken":"…","machineType":"…"}}'
+  if (path === '/admin/credentials/extras' && request.method === 'POST') {
+    const body = (await request.json().catch(() => ({}))) as {
+      realm?: unknown
+      uid?: unknown
+      extras?: unknown
+    }
+    // ⚠️ uid 是 storage key（`qodercn:` 前缀要带上），形状与
+    // `/admin/import` 里 `storageUidFor` 的产物一致，否则查不到凭据。
+    const uid = typeof body.uid === 'string' ? body.uid.trim() : ''
+    if (!isValidUid(uid)) {
+      return json(
+        { error: 'uid 缺失或非法（需为存储键，如 `qodercn:<uid>`，只允许字母数字 _ - :）' },
+        400,
+      )
+    }
+    if (typeof body.extras !== 'object' || body.extras === null) {
+      return json({ error: 'extras 必须是对象' }, 400)
+    }
+    const extras: Record<string, string> = {}
+    for (const [key, value] of Object.entries(body.extras as Record<string, unknown>)) {
+      // key 限制成标识符形状：它会被当作明文 key 落库，不该带控制字符
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(key)) {
+        return json({ error: `extras 的 key 非法：${key}` }, 400)
+      }
+      if (typeof value !== 'string' || value.trim() === '') {
+        return json({ error: `extras.${key} 必须是非空字符串` }, 400)
+      }
+      extras[key] = value.trim()
+    }
+    if (Object.keys(extras).length === 0) {
+      return json({ error: 'extras 不能为空' }, 400)
+    }
+    const realm = typeof body.realm === 'string' && body.realm !== '' ? body.realm : 'cn'
+    const pool = env.ACCOUNT_POOL.get(env.ACCOUNT_POOL.idFromName(realm))
+    const result = await pool.mergeCredentialExtras(uid, extras)
+    if (result === undefined) {
+      // 404 而不是 200：凭据不存在时若报成功，用户会以为补上了，
+      // 下次签到仍失败却找不到原因。
+      return json({ error: `凭据不存在：${uid}（realm=${realm}）` }, 404)
+    }
+    return json({ ok: true, ...result })
+  }
+
   // ── 账号池状态 ──
   if (path === '/admin/pool' && request.method === 'GET') {
     const realm = url.searchParams.get('realm') ?? 'cn'
