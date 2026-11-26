@@ -40,7 +40,13 @@
  * - **机器身份改为用户配置**：参考实现 spawn `runtime-info.exe`
  *   （`deepseek-harness-codearts/src/qoder-machine.ts:421`）取
  *   `Cosy-MachineToken` / `Cosy-MachineType`。Workers **无 `child_process`**
- *   （`AGENTS.md §2.5` 第 4 条）。故这两个值改为凭据 `extras` 里的两个字符串。
+ *   （`AGENTS.md §2.5` 第 4 条）。故这两个值改为凭据 `extras` 里的两个字符串，
+ *   用户可用 `POST /admin/credentials/extras` 单独补（只改 extras、不动 token，
+ *   避免「有 token 的号补不了头、补了头的号没 token」的死循环）。
+ *   ⚠️ **取值位置是实测的**（Qoder CN 0.5.17）：`<安装目录>/resources/umid/`
+ *   下的 `runtime-info.exe`，直接运行即输出 JSON，含 `machineToken` /
+ *   `machineType` / `machineCode` / `vmInfo`。客户端数据目录里**没有**
+ *   `machine_token.json` —— 早期注释写它，让人去找一个不存在的文件。
  *   ⚠️ **后果必须知道**（`src/qoder-machine.ts:33-59`）：缺这两个头时
  *   `/sash/api/v1/me/campaigns` 只回 **1 条 `VIEW_DETAILS`、`claimable:false`**，
  *   于是「今天已领」与「服务端没下发可领项」在响应上**无法区分** ——
